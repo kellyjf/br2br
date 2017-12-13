@@ -1,0 +1,63 @@
+#!/bin/bash
+
+ip link del e1
+ip netns del b1
+ip netns del b2
+
+if [[ $1 == "clean" ]] ; then exit ;fi
+
+ip link add e1 type veth peer name e2
+ip link set e1 up
+ip link set e2 up
+
+tshark -q -i e1 -w /tmp/e1.pcap &
+TS=$!
+
+ip netns add b1
+ip netns add b2
+
+ip netns exec b1 ip link set lo up
+ip netns exec b2 ip link set lo up
+
+ip netns exec b1 brctl addbr b1
+ip netns exec b1 ip link set b1 up
+ip netns exec b2 brctl addbr b2
+ip netns exec b2 ip link set b2 up
+
+
+ip link add link e1 name b1b2 type vlan id 1 
+ip link add link e2 name b2b1 type vlan id 1 
+
+ip link set b1b2 netns b1 up
+ip link set b2b1 netns b2 up
+
+ip netns exec b1 brctl addif b1 b1b2
+ip netns exec b2 brctl addif b2 b2b1
+
+for bridge in b1 b2; do
+	for station in s1 s2 ; do
+		host=${bridge#b}${station#s}
+		macb=$(printf "%02x" $host)
+		ip netns del ${bridge}${station}
+		ip netns add ${bridge}${station}
+		ip link add link e1 ${bridge}${host} type vlan id $host
+		ip link add link e2 ${station}${host} type vlan id $host
+		ip link set ${bridge}${host} netns ${bridge}${station} address 06:01:01:01:01:$macb up
+		ip link set ${station}${host} netns ${bridge} address 06:00:00:00:00:$macb up
+		ip netns exec ${bridge} brctl addif ${bridge} ${station}${host}
+		ip netns exec ${bridge}${station} ip link set lo up
+		ip netns exec ${bridge}${station} ip addr add 172.20.10.2${host}/24 dev ${bridge}${host}
+		ip netns exec ${bridge}${station} ip route add default via 172.20.10.1 dev ${bridge}${host}
+	done
+done
+for bridge in b1 b2; do
+	for station in s1 s2 ; do
+		for host in 211 212 221 222; do
+			ip netns exec ${bridge}${station} ping -c 2 172.20.10.$host
+			sleep 1
+		done
+	done
+done
+sleep 1
+kill $TS
+
